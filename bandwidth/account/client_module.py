@@ -47,10 +47,42 @@ class Client:
             raise ValueError('Arguments user_id, api_token and api_secret are required. '
                              'Use bandwidth.client("catapult", "YOUR-USER-ID", "YOUR-API-TOKEN", "YOUR-API-SECRET")')
         self.user_id = user_id
-        self.api_endpoint = other_options.get(
-            'api_endpoint', 'https://api.catapult.inetwork.com')
         self.api_version = other_options.get('api_version', 'v1')
+        if self.api_v1_version:
+            self.api_endpoint = other_options.get(
+                'api_endpoint', 'https://api.catapult.inetwork.com')
+        else:
+            self.api_endpoint = other_options.get(
+                'api_endpoint', 'https://dashboard.bandwidth.com')
         self.auth = (api_token, api_secret)
+
+    def _check_api_version_match(self, version):
+        """
+           Internal function
+ 
+           returns True if API verison matches version 
+           else returns False.
+        """
+        if self.api_version == version:
+            return True
+
+        return False
+
+    @property
+    def api_v1_version(self):
+        """
+           returns True if v1 API verison is being utilized.
+           else returns False.
+        """
+        return self._check_api_version_match('v1') 
+
+    @property
+    def api_v2_version(self):
+        """
+           returns True if v2 API verison is being utilized.
+           else returns False.
+        """
+        return self._check_api_version_match('v2') 
 
     def _request(self, method, url, *args, **kwargs):
         user_agent = 'PythonSDK_' + version
@@ -68,7 +100,8 @@ class Client:
 
     def _check_response(self, response):
         if response.status_code >= 400:
-            if response.headers.get('content-type') == 'application/json':
+            content_type = response.headers.get('content-type')
+            if content_type and content_type.startswith('application/json'):
                 data = response.json()
                 raise BandwidthAccountAPIException(
                     response.status_code, data['message'], code=data.get('code'))
@@ -81,11 +114,15 @@ class Client:
         self._check_response(response)
         data = None
         id = None
-        if response.headers.get('content-type') == 'application/json':
+        content_type = response.headers.get('content-type')
+        if content_type and content_type.startswith('application/json'):
             data = convert_object_to_snake_case(response.json())
         location = response.headers.get('location')
         if location is not None:
             id = location.split('/')[-1]
+        else:
+            id = data.get('id', None)
+
         return (data, response, id)
 
     """

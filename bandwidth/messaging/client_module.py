@@ -6,7 +6,6 @@ import itertools
 from bandwidth.voice.lazy_enumerable import get_lazy_enumerator
 from bandwidth.convert_camel import convert_object_to_snake_case
 from bandwidth.version import __version__ as version
-
 from .api_exception_module import BandwidthMessageAPIException
 
 quote = urllib.parse.quote if six.PY3 else urllib.quote
@@ -51,24 +50,60 @@ class Client:
         self.api_version = other_options.get('api_version', 'v1')
         self.auth = (api_token, api_secret)
 
+    def _check_api_version_match(self, version):
+        """
+           Internal function
+ 
+           returns True if API verison matches version 
+           else returns False.
+        """
+        if self.api_version == version:
+            return True
+
+        return False
+
+    @property
+    def api_v1_version(self):
+        """
+           returns True if v1 API verison is being utilized.
+           else returns False.
+        """
+        return self._check_api_version_match('v1')
+            
+    @property
+    def api_v2_version(self):
+        """
+           returns True if v2 API verison is being utilized.
+           else returns False.
+        """
+        return self._check_api_version_match('v2')
+
     def _request(self, method, url, *args, **kwargs):
-        user_agent = 'PythonSDK_' + version
         headers = kwargs.pop('headers', None)
-        if headers:
-            headers['User-Agent'] = user_agent
-        else:
-            headers = {
-                'User-Agent': user_agent
-            }
+        if self.api_v1_version:
+            user_agent = 'PythonSDK_' + version
+            if headers:
+                headers['User-Agent'] = user_agent
+            else:
+                headers = {
+                    'User-Agent': user_agent
+               }
+
+        headers = {
+            'content-type': 'application/json',
+        }
         if url.startswith('/'):
             # relative url
             url = '%s/%s%s' % (self.api_endpoint, self.api_version, url)
+
         return requests.request(method, url, auth=self.auth, headers=headers, *args, **kwargs)
 
     def _check_response(self, response):
         if response.status_code >= 400:
-            if response.headers.get('content-type') == 'application/json':
+            content_type = response.headers.get('content-type')
+            if content_type and content_type.startswith('application/json'):
                 data = response.json()
+                print("data: {}".format(data))
                 raise BandwidthMessageAPIException(
                     response.status_code, data['message'], code=data.get('code'))
             else:
@@ -80,11 +115,17 @@ class Client:
         self._check_response(response)
         data = None
         id = None
-        if response.headers.get('content-type') == 'application/json':
+        content_type = response.headers.get('content-type')
+        if content_type and content_type.startswith('application/json'):
             data = convert_object_to_snake_case(response.json())
-        location = response.headers.get('location')
-        if location is not None:
-            id = location.split('/')[-1]
+
+        if self.api_v1_version:
+            location = response.headers.get('location')
+            if location is not None:
+                id = location.split('/')[-1]
+        else:
+            id = data.get('id', None)
+
         return (data, response, id)
 
     def list_messages(self,
@@ -133,6 +174,8 @@ class Client:
             ## m-t2gspvs6iadfe
             ## m-shuh6d6pyadfe
         """
+        if not self.api_v1_version:
+            raise NotImplementedError('this feature is only available with v1 SDK')
 
         kwargs['from'] = from_
         kwargs['to'] = to
@@ -196,11 +239,13 @@ class Client:
         kwargs['to'] = to
         kwargs['text'] = text
         kwargs['media'] = media
-        kwargs['receiptRequested'] = receipt_requested
-        kwargs['callbackUrl'] = callback_url
-        kwargs['callbackHttpMethod'] = callback_http_method
-        kwargs['callbackTimeout'] = callback_timeout
-        kwargs['fallbackUrl'] = fallback_url
+        if self.api_v1_version:
+            kwargs['receiptRequested'] = receipt_requested
+            kwargs['callbackUrl'] = callback_url
+            kwargs['callbackHttpMethod'] = callback_http_method
+            kwargs['callbackTimeout'] = callback_timeout
+            kwargs['fallbackUrl'] = fallback_url
+
         kwargs['tag'] = tag
 
         return self._make_request('post', '/users/%s/messages' % self.user_id, json=kwargs)[2]
@@ -249,6 +294,9 @@ class Client:
             ])
 
         """
+        if not self.api_v1_version:
+            raise NotImplementedError('this feature is only available with v1 SDK')
+
         results = self._make_request(
             'post', '/users/%s/messages' % self.user_id, json=messages_data)[0]
         for i in range(0, len(messages_data)):
@@ -286,4 +334,8 @@ class Client:
             ##     'to'                      :'+19191234567'
             ## }
         """
+        if not self.api_v1_version:
+            raise NotImplementedError('this feature is only available with v1 SDK')
+
         return self._make_request('get', '/users/%s/messages/%s' % (self.user_id, id))[0]
+        
