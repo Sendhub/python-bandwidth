@@ -3,12 +3,19 @@ import six
 import urllib
 import json
 import itertools
+from xml.etree import ElementTree
 from bandwidth.voice.lazy_enumerable import get_lazy_enumerator
 from bandwidth.convert_camel import convert_object_to_snake_case
 from bandwidth.voice.decorators import play_audio
 from bandwidth.version import __version__ as version
+from bandwidth import bw_error_codes
+import xml
+import dicttoxml
+import xmltodict
+import logging
 
 from .api_exception_module import BandwidthAccountAPIException
+from .api_exception_module import BandwidthOrderPendingException
 
 quote = urllib.parse.quote if six.PY3 else urllib.quote
 lazy_map = map if six.PY3 else itertools.imap
@@ -55,6 +62,7 @@ class Client:
             self.api_endpoint = other_options.get(
                 'api_endpoint', 'https://dashboard.bandwidth.com')
         self.auth = (api_token, api_secret)
+        self.account_id = other_options.get('account_id', None)
 
     def _check_api_version_match(self, version):
         """
@@ -84,46 +92,93 @@ class Client:
         """
         return self._check_api_version_match('v2') 
 
+    def get_error_details(self, resp):
+        """
+           parses response in case of error and 
+           returns error code and decription
+        """
+        _error_resp = resp.get('ErrorList', {})
+        error_resp = _error_resp.get('Error', {})
+        return error_resp.get('Code', 'NA'), error_resp.get('Description', 'NA')
+
     def _request(self, method, url, *args, **kwargs):
-        user_agent = 'PythonSDK_' + version
-        headers = kwargs.pop('headers', None)
-        if headers:
-            headers['User-Agent'] = user_agent
-        else:
+        if self.api_v1_version:
+            user_agent = 'PythonSDK_' + version
+            headers = kwargs.pop('headers', None)
+            if headers:
+                headers['User-Agent'] = user_agent
+            else:
+                headers = {
+                    'User-Agent': user_agent
+                }
+
+        if self.api_v2_version:
             headers = {
-                'User-Agent': user_agent
+                'content-type': 'application/xml'
             }
+
         if url.startswith('/'):
             # relative url
-            url = '%s/%s%s' % (self.api_endpoint, self.api_version, url)
-        return requests.request(method, url, auth=self.auth, headers=headers, *args, **kwargs)
+            if self.api_v1_version:
+                url = '%s/%s%s' % (self.api_endpoint, self.api_version, url)
+            else:
+                url = '{}{}'.format(self.api_endpoint, url)
+
+        return requests.request(method, url, auth=self.auth,
+                                headers=headers, *args, **kwargs)
 
     def _check_response(self, response):
         if response.status_code >= 400:
             content_type = response.headers.get('content-type')
+            error_msg = bw_error_codes.get(response.status_code, '')
             if content_type and content_type.startswith('application/json'):
                 data = response.json()
+                # if non-descriptive error message isnt available
+                # build more details and pass to Exception API
+                msg = data.get('message', None)
+                if not msg:
+                    msg = error_msg
+
                 raise BandwidthAccountAPIException(
-                    response.status_code, data['message'], code=data.get('code'))
+                       response.status_code, msg,
+                       code=data.get('code',
+                                     response.status_code))
+            elif content_type and content_type.startswith('application/xml'):
+                try:
+                    data = xmltodict.parse(response.content)
+                    error_code, error_desc = self.get_error_details(data.get('OrderResponse', {}))
+                except xml.parsers.expat.ExpatError as e:
+                    error_code = 0
+                    error_desc = response.content.decode('utf-8') 
+                    raise BandwidthAccountAPIException(
+                               response.status_code, error_desc, code=error_code)
             else:
+                # if non-descriptive error message isnt available
+                # build more details and pass to Exception API
+                msg = response.content.decode('utf-8')  #[:79]
+                if not msg:
+                    msg = error_msg
                 raise BandwidthAccountAPIException(
-                    response.status_code, response.content.decode('utf-8')[:79])
+                               response.status_code, msg)
 
     def _make_request(self, method, url, *args, **kwargs):
         response = self._request(method, url, *args, **kwargs)
         self._check_response(response)
         data = None
-        id = None
+        myid = None
         content_type = response.headers.get('content-type')
         if content_type and content_type.startswith('application/json'):
             data = convert_object_to_snake_case(response.json())
+        elif content_type and content_type.startswith('application/xml'):
+            data = xmltodict.parse(response.content)
+
         location = response.headers.get('location')
         if location is not None:
-            id = location.split('/')[-1]
-        else:
-            id = data.get('id', None)
+            myid = location.split('/')[-1]
+        elif data and isinstance(data, dict):
+            myid = data.get('id', None)
 
-        return (data, response, id)
+        return (data, response, myid)
 
     """
     Account API
@@ -438,6 +493,29 @@ class Client:
         self._make_request(
             'delete', '/users/%s/applications/%s' % (self.user_id, app_id))
 
+    def _parse_available_numbers_list(self, data):
+        """
+           parses XML response returned by v2 search number API and
+           returns a list of numbers. 
+           only supported on v2 of messaging APIs.
+        """
+        data = data.get('SearchResult', {})
+        if self.api_v2_version:
+            result_count = data.get('ResultCount', 0)
+            if result_count:
+                tel_dict = data.get('TelephoneNumberList', {})
+                tel_list = tel_dict.get('TelephoneNumber', [])
+                # response includes string as number if result count is
+                # 1 otherwise its a list of available numbers
+                if isinstance(tel_list, list) is False:
+                    tel_list = [tel_list]
+            else:
+                tel_list = []
+
+            return tel_list 
+        else:
+            raise NotImplementedError("This method is only supported with v2 of the APIs")
+
     def search_available_local_numbers(self,
                                        city=None,
                                        state=None,
@@ -495,15 +573,26 @@ class Client:
             ## +19104440230
 
         """
-        kwargs["city"] = city
-        kwargs["state"] = state
-        kwargs["zip"] = zip_code
-        kwargs["areaCode"] = area_code
-        kwargs["localNumber"] = local_number
-        kwargs["inLocalCallingArea"] = in_local_calling_area
-        kwargs["quantity"] = quantity
-        kwargs["pattern"] = pattern
-        return self._make_request('get', '/availableNumbers/local', params=kwargs)[0]
+        if city: kwargs["city"] = city
+        if state: kwargs["state"] = state
+        if zip_code: kwargs["zip"] = zip_code
+        if area_code: kwargs["areaCode"] = area_code
+        if quantity: kwargs["quantity"] = quantity
+        if self.api_v1_version and local_number:
+            kwargs["localNumber"] = local_number
+        if self.api_v1_version and in_local_calling_area:
+            kwargs["inLocalCallingArea"] = in_local_calling_area
+        if self.api_v1_version and pattern:
+            kwargs["pattern"] = pattern
+
+        if self.api_v1_version:
+            url = '/availableNumbers/local'
+            return self._make_request('get', url, params=kwargs)[0]
+        else:
+            url = '/api/accounts/{}/availableNumbers'.format(self.account_id)
+            data, response, myid = self._make_request('get', url, params=kwargs)
+            return self._parse_available_numbers_list(data)
+
 
     def search_available_toll_free_numbers(self, quantity=None, pattern=None, **kwargs):
         """
@@ -540,8 +629,15 @@ class Client:
 
         """
         kwargs["quantity"] = quantity
-        kwargs["pattern"] = pattern
-        return self._make_request('get', '/availableNumbers/tollFree', params=kwargs)[0]
+        if self.api_v1_version:
+            kwargs["pattern"] = pattern
+            return self._make_request('get', '/availableNumbers/tollFree', params=kwargs)[0]
+        else:
+            # wild card pattern is for 8xx or 80x or 87x etc.
+            kwargs["tollFreeWildCardPattern"] = pattern
+            url = '/api/accounts/{}/availableNumbers'.format(self.account_id)
+            data, response, order_id = self._make_request('get', url, params=kwargs)
+            return self._parse_available_numbers_list(data)
 
     def search_and_order_local_numbers(self,
                                        city=None,
@@ -551,6 +647,8 @@ class Client:
                                        local_number=None,
                                        in_local_calling_area=None,
                                        quantity=None,
+                                       siteid=None,
+                                       name=None,
                                        **kwargs):
         """
         Searches and orders for available local numbers.
@@ -584,22 +682,79 @@ class Client:
 
 
         """
-        kwargs["city"] = city
-        kwargs["state"] = state
-        kwargs["zip"] = zip_code
-        kwargs["areaCode"] = area_code
-        kwargs["localNumber"] = local_number
-        kwargs["inLocalCallingArea"] = in_local_calling_area
-        kwargs["quantity"] = quantity
-        number_list = self._make_request(
-            'post', '/availableNumbers/local', params=kwargs)[0]
-        for item in number_list:
-            item['id'] = item.get('location', '').split('/')[-1]
+        if city: kwargs["city"] = city
+        if state: kwargs["state"] = state
+        if zip_code: kwargs["zip"] = zip_code
+
+        if self.api_v1_version:
+            kwargs["inLocalCallingArea"] = in_local_calling_area
+            kwargs["localNumber"] = local_number
+            if area_code: kwargs["areaCode"] = area_code
+            if quantity: kwargs["quantity"] = quantity
+            number_list = self._make_request(
+                'post', '/availableNumbers/local', params=kwargs)[0]
+            for item in number_list:
+                item['id'] = item.get('location', '').split('/')[-1]
+            return number_list
+        else:
+            if area_code:
+                kwargs['AreaCodeSearchAndOrderType'] = {
+                    'AreaCode': area_code,
+                    'Quantity': quantity
+                }
+
+            return self._order_v2_phone_numbers(siteid, name, kwargs)
+
+    def _order_v2_phone_numbers(self, siteid, name, kwargs):
+        """
+           function that actually sends/parses request for
+           ordering phone numbers weather local numbers or
+           toll free numbers.
+
+           returns list of numbers ordered if successful
+           raises Exception if requested numbers are not
+           available.
+        """
+        if siteid: kwargs["SiteId"] = siteid
+        if name: kwargs["Name"] = name
+
+        # this order ought to be complete right away, no waiting on for
+        # backorder or partial fullfillment
+        #kwargs['BackOrderRequested'] = False
+        #kwargs['PartialAllowed'] = False
+        xml_data = dicttoxml.dicttoxml(kwargs,
+                                       custom_root='Order',
+                                       attr_type=False,
+                                       item_func=lambda x: 'TelephoneNumber')
+        #print(xml_data)
+        url = '/api/accounts/{}/orders'.format(self.account_id)
+        data, resp, order_id = self._make_request('post', url, data=xml_data)
+        # check if order is successful
+        num_tries = 0
+        number_list = []
+        order_status = '' 
+        while num_tries < 5 and order_status not in ('COMPLETE', 'FAILED', 'PARTIAL'):
+            # order did not go through yet - wait and try again
+            order_status, number_list, error_desc = self.get_phoneorder_info(order_id)
+            #print("Order status: {}, try: {}".format(order_status, num_tries))
+            num_tries += 1
+
+        if order_status == 'RECEIVED':
+            raise BandwidthOrderPendingException(order_id)
+
+        if order_status != 'COMPLETE':
+            raise BandwidthAccountAPIException(order_status, 'Unable to procure number, Error: {}, Attempts: {}'.format(error_desc, num_tries))
+
         return number_list
 
-    def search_and_order_toll_free_numbers(self, quantity, **kwargs):
+    def search_and_order_toll_free_numbers(self,
+                                           quantity,
+                                           pattern=None,
+                                           siteid=None,
+                                           name=None,
+                                           **kwargs):
         """
-        Searches for available local or toll free numbers.
+        Searches for available toll free numbers and buys them.
 
         Query parameters for toll free numbers
         :param int quantity: The maximum number of numbers to return (default 10, maximum 5000)
@@ -622,12 +777,20 @@ class Client:
             ## +18444841048
 
         """
-        kwargs["quantity"] = quantity
-        list = self._make_request(
-            'post', '/availableNumbers/tollFree', params=kwargs)[0]
-        for item in list:
-            item['id'] = item.get('location', '').split('/')[-1]
-        return list
+        if self.api_v1_version:
+            kwargs["quantity"] = quantity
+            list = self._make_request(
+                'post', '/availableNumbers/tollFree', params=kwargs)[0]
+            for item in list:
+                item['id'] = item.get('location', '').split('/')[-1]
+            return list
+        else:
+            #kwargs['TollFreeSearchAndOrderType'] = {
+            kwargs['TollFreeWildCharSearchAndOrderType'] = {
+                'TollFreeWildCardPattern': pattern if pattern else '8**',
+                'Quantity': quantity
+            }
+            return self._order_v2_phone_numbers(siteid, name, kwargs)
 
     def list_domains(self, size=None, **kwargs):
         """
@@ -1297,6 +1460,8 @@ class Client:
                            name=None,
                            application_id=None,
                            fallback_number=None,
+                           quantity=1,
+                           siteid=None,
                            **kwargs):
         """
         Allocates a number so user can use it to make and receive calls and send
@@ -1318,12 +1483,28 @@ class Client:
             # n-asdf123
         """
 
-        kwargs['number'] = number
         kwargs['name'] = name
         kwargs['applicationId'] = application_id
         kwargs['fallbackNumber'] = fallback_number
 
-        return self._make_request('post', '/users/%s/phoneNumbers' % self.user_id, json=kwargs)[2]
+        if self.api_v1_version:
+            kwargs['number'] = number
+            return self._make_request('post', '/users/%s/phoneNumbers' % self.user_id, json=kwargs)[2]
+        else:
+            numberlist = []
+            if quantity <= 0:
+                raise ValueError("Quantity of phone numbers must be 1 or greater, passed: {}".format(quantity))
+            elif quantity == 1:
+                numberlist.append(number[0] if isinstance(number, list) else number)
+            else:
+                if isinstance(number, list) is False:
+                    raise ValueError("Expecting list of phone numbers to order, passed: {}".format(type(number)))
+                numberlist = number
+
+            kwargs['ExistingTelephoneNumberOrderType'] = {
+                'TelephoneNumberList': numberlist,
+            }
+            return self._order_v2_phone_numbers(siteid, name, kwargs)
 
     def get_phone_number(self, number_id):
         """
@@ -1357,6 +1538,8 @@ class Client:
             ## }
 
         """
+        if self.api_v2_version:
+            raise NotImplementedError("This method is not supported in v2 of the APIs")
         return self._make_request('get', '/users/%s/phoneNumbers/%s' % (self.user_id, number_id))[0]
 
     def update_phone_number(self, number_id,
@@ -1404,6 +1587,9 @@ class Client:
             ##     'number_state'   :'enabled'
             ## }
         """
+        if self.api_v2_version:
+            raise NotImplementedError("This method is not supported in v2 of the APIs")
+
         kwargs['name'] = name
         kwargs['applicationId'] = application_id
         kwargs['fallbackNumber'] = fallback_number
@@ -1411,7 +1597,7 @@ class Client:
         self._make_request(
             'post', '/users/%s/phoneNumbers/%s' % (self.user_id, number_id), json=kwargs)
 
-    def delete_phone_number(self, number_id):
+    def delete_phone_number(self, number_id, name=None):
         """
         Remove a phone number
 
@@ -1422,5 +1608,103 @@ class Client:
 
             api.delete_phone_number('numberId')
         """
-        self._make_request(
-            'delete', '/users/%s/phoneNumbers/%s' % (self.user_id, number_id))
+        if self.api_v1_version:
+            self._make_request(
+                'delete', '/users/%s/phoneNumbers/%s' % (self.user_id, number_id))
+        else:
+            url = '/api/accounts/{}/disconnects'.format(self.account_id)
+            kwargs = {}
+            kwargs['DisconnectTelephoneNumberOrderType'] = {
+                    'TelephoneNumberList': {
+                         'TelephoneNumber': number_id,
+                    }
+            }
+            xml_data = dicttoxml.dicttoxml(kwargs, custom_root='DisconnectTelephoneNumberOrder', attr_type=False)
+            data, resp, order_id = self._make_request('post', url, data=xml_data)
+            # check if order is successful
+            num_tries = 0
+            number_list = []
+            order_status = '' 
+            while num_tries < 5 and order_status not in ('COMPLETE', 'FAILED', 'PARTIAL'):
+                # order did not go through yet - wait and try again
+                order_status, numbers_deleted, error_desc = self.get_phonedelete_info(order_id)
+                print("Order status: {}, try: {}".format(order_status, num_tries))
+                num_tries += 1
+
+            if order_status != 'COMPLETE':
+                raise BandwidthAccountAPIException(order_status, 'Unable to delete number {}, Attempts: {}, Error: {}'.format(number_id, num_tries, error_desc))
+
+    def get_phoneorder_info(self, order_id):
+        """
+        Retreives order information and returns a dictionary
+
+        :param number_id: order_id
+
+        : returns order dictionary
+        """
+        if not self.api_v2_version:
+            raise NotImplementedError("This API is supported only for v2 APIs")
+
+        url = '/api/accounts/{}/orders/{}'.format(self.account_id, order_id)
+        data, response, myid = self._make_request('get', url)
+        number_list = []
+        error_desc = ''
+        order_response = data.get('OrderResponse', {})
+        order_status = order_response.get('OrderStatus', 'Pending')
+        completed_qty = int(order_response.get('CompletedQuantity', 0))
+        if order_status in ('PARTIAL', 'COMPLETE'):
+            number_dict = order_response.get('CompletedNumbers', {})
+            # get objects or list of objects
+            numbers = number_dict.get('TelephoneNumber', [])
+            if isinstance(numbers, list) is False:
+                numbers = [numbers]
+            for x in range(completed_qty):
+                full_number = numbers[x].get('FullNumber', None)
+                if full_number:
+                    number_list.append(full_number)
+                else:
+                    logging.error("Bandwidth returned phone number response inconsistent. Check dashboard for orphaned numbers")
+
+        elif order_status in ('FAILED', 'RECEIVED'):
+            error_code, error_desc = self.get_error_details(order_response)
+
+        return order_status, number_list, error_desc
+
+    def get_phonedelete_info(self, order_id):
+        """
+        Retreives order information and returns a dictionary
+
+        :param number_id: order_id
+
+        : returns order dictionary
+        """
+        if not self.api_v2_version:
+            raise NotImplementedError("This API is supported only for v2 APIs")
+
+        url = '/api/accounts/{}/disconnects/{}'.format(self.account_id, order_id)
+        data, response, myid = self._make_request('get', url)
+        number_list = []
+        error_desc = ''
+        order_response = data.get('DisconnectTelephoneNumberOrderResponse', {})
+        order_status = order_response.get('OrderStatus', 'Pending')
+        if order_status == 'FAILED':
+            #_error_resp = order_response.get('ErrorList', {})
+            #error_resp = _error_resp.get('Error', {})
+            #error_code = error_resp.get('Code', 'NA')
+            #error_desc = error_resp.get('Description', '')
+            error_code, error_desc = self.get_error_details(order_response)
+        else:
+            numbers = order_response.get('DisconnectedTelephoneNumberList', [])
+
+            # check for error code 5006
+            if isinstance(numbers, list) is False:
+                numbers = [numbers]
+            for number in numbers:
+                full_number = number.get('TelephoneNumber', None)
+                if full_number:
+                    number_list.append(full_number)
+                else:
+                    logging.error("Bandwidth returned phone number appropriately. Check dashboard for orphaned numbers")
+
+        return order_status, number_list, error_desc
+

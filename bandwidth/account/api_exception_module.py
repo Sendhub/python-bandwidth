@@ -25,3 +25,7 @@ class BandwidthAccountAPIException(Exception):
 
     def __str__(self):
         return 'Error %s: %s' % (self.code, self.message)
+
+class BandwidthOrderPendingException(Exception):
+    """ exception generated if order is pending and system
+        must schedule tasks for checking status later """

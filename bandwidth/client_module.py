@@ -3,6 +3,14 @@ _SUPPORTED_CLIENTS = ['voice', 'messaging', 'account', 'numbers']
 
 _client_classes = {}
 
+bw_error_codes = {
+    400: 'Bad Request',
+    401: 'Unauthorized - please check your credentials',
+    403: 'Forbidden - unauthorized to access this resource',
+    415: 'Unsupported Content Type',
+    429: 'Too many requests - please try again later',
+}
+
 
 def client(client_name, *args, **kwargs):
     """
