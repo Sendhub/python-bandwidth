@@ -7,6 +7,7 @@ from bandwidth.voice.lazy_enumerable import get_lazy_enumerator
 from bandwidth.convert_camel import convert_object_to_snake_case
 from bandwidth.version import __version__ as version
 from .api_exception_module import BandwidthMessageAPIException
+from bandwidth import bw_error_codes
 
 quote = urllib.parse.quote if six.PY3 else urllib.quote
 lazy_map = map if six.PY3 else itertools.imap
@@ -101,6 +102,7 @@ class Client:
     def _check_response(self, response):
         if response.status_code >= 400:
             content_type = response.headers.get('content-type')
+            error_msg = bw_error_codes.get(response.status_code, '')
             if content_type and content_type.startswith('application/json'):
                 data = response.json()
                 print("data: {}".format(data))
@@ -108,7 +110,7 @@ class Client:
                     response.status_code, data['message'], code=data.get('code'))
             else:
                 raise BandwidthMessageAPIException(
-                    response.status_code, response.content.decode('utf-8')[:79])
+                    response.status_code, response.content.decode('utf-8'))
 
     def _make_request(self, method, url, *args, **kwargs):
         response = self._request(method, url, *args, **kwargs)

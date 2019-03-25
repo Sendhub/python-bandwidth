@@ -1445,15 +1445,25 @@ class Client:
             ## ]
         """
 
-        kwargs['applicationId'] = application_id
-        kwargs['state'] = state
-        kwargs['name'] = name
-        kwargs['city'] = city
-        kwargs['numberState'] = number_state
-        kwargs['size'] = size
+        if self.api_v1_version:
+            kwargs['state'] = state
+            kwargs['name'] = name
+            kwargs['city'] = city
+            kwargs['numberState'] = number_state
+            kwargs['size'] = size
 
-        path = '/users/%s/phoneNumbers' % self.user_id
-        return get_lazy_enumerator(self, lambda: self._make_request('get', path, params=kwargs))
+            path = '/users/%s/phoneNumbers' % self.user_id
+            return get_lazy_enumerator(self, lambda: self._make_request('get', path, params=kwargs))
+
+        else:
+            kwargs['applicationId'] = application_id
+            url = '/api/accounts/{}/inserviceNumbers'.format(self.account_id)
+            data, resp, order_id = self._make_request('get', url, params=kwargs)
+            if resp.status_code != 200:
+                return []
+            # parse numbers from dictionary
+            raise NotImplementedError("Incomplete implementation..........")
+
 
     def order_phone_number(self,
                            number=None,
@@ -1539,8 +1549,12 @@ class Client:
 
         """
         if self.api_v2_version:
-            raise NotImplementedError("This method is not supported in v2 of the APIs")
-        return self._make_request('get', '/users/%s/phoneNumbers/%s' % (self.user_id, number_id))[0]
+            url = '/api/accounts/{}/inserviceNumbers/{}'.format(self.account_id, number_id)
+            logging.info("Calling Get to URL: {}".format(url))
+            data, resp, order_id = self._make_request('get', url)
+            logging.info("data: {}, response: {}".format(data, resp))
+        else:
+            return self._make_request('get', '/users/%s/phoneNumbers/%s' % (self.user_id, number_id))[0]
 
     def update_phone_number(self, number_id,
                             name=None,
