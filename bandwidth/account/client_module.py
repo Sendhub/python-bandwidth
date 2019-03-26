@@ -736,7 +736,6 @@ class Client:
         while num_tries < 5 and order_status not in ('COMPLETE', 'FAILED', 'PARTIAL'):
             # order did not go through yet - wait and try again
             order_status, number_list, error_desc = self.get_phoneorder_info(order_id)
-            #print("Order status: {}, try: {}".format(order_status, num_tries))
             num_tries += 1
 
         if order_status == 'RECEIVED':
@@ -1642,7 +1641,6 @@ class Client:
             while num_tries < 5 and order_status not in ('COMPLETE', 'FAILED', 'PARTIAL'):
                 # order did not go through yet - wait and try again
                 order_status, numbers_deleted, error_desc = self.get_phonedelete_info(order_id)
-                print("Order status: {}, try: {}".format(order_status, num_tries))
                 num_tries += 1
 
             if order_status != 'COMPLETE':
