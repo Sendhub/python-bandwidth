@@ -8,6 +8,7 @@ from bandwidth.convert_camel import convert_object_to_snake_case
 from bandwidth.version import __version__ as version
 from .api_exception_module import BandwidthMessageAPIException
 from bandwidth import bw_error_codes
+import logging
 
 quote = urllib.parse.quote if six.PY3 else urllib.quote
 lazy_map = map if six.PY3 else itertools.imap
@@ -50,6 +51,7 @@ class Client:
             'api_endpoint', 'https://api.catapult.inetwork.com')
         self.api_version = other_options.get('api_version', 'v1')
         self.auth = (api_token, api_secret)
+        self.DEBUG = other_options.get('DEBUG', False)
 
     def _check_api_version_match(self, version):
         """
@@ -95,8 +97,14 @@ class Client:
         }
         if url.startswith('/'):
             # relative url
-            url = '%s/%s%s' % (self.api_endpoint, self.api_version, url)
+            if self.api_v2_version:
+                url = '{}{}'.format(self.api_endpoint, url)
+            else:
+                url = '%s/%s%s' % (self.api_endpoint, self.api_version, url)
 
+        if self.DEBUG:
+            logging.info('{} to {}, auth:{}, headers: {}, args: {}, kwargs: {}'.
+                         format(method, url, self.auth, headers, args, kwargs))
         return requests.request(method, url, auth=self.auth, headers=headers, *args, **kwargs)
 
     def _check_response(self, response):
@@ -105,10 +113,14 @@ class Client:
             error_msg = bw_error_codes.get(response.status_code, '')
             if content_type and content_type.startswith('application/json'):
                 data = response.json()
-                print("data: {}".format(data))
+                if self.DEBUG:
+                    logging.info('Error with request, response: {}'.format(data))
                 raise BandwidthMessageAPIException(
                     response.status_code, data['message'], code=data.get('code'))
             else:
+                if self.DEBUG:
+                    logging.info('Error with request, response: {}'.
+                                 format(response.content.decode('utf-8')))
                 raise BandwidthMessageAPIException(
                     response.status_code, response.content.decode('utf-8'))
 
@@ -128,6 +140,9 @@ class Client:
         else:
             id = data.get('id', None)
 
+        if self.DEBUG:
+            logging.info('success with request, data: {}, response: {}, id: {}'.
+                         format(data, response, id))
         return (data, response, id)
 
     def list_messages(self,
@@ -336,8 +351,5 @@ class Client:
             ##     'to'                      :'+19191234567'
             ## }
         """
-        if not self.api_v1_version:
-            raise NotImplementedError('this feature is only available with v1 SDK')
-
         return self._make_request('get', '/users/%s/messages/%s' % (self.user_id, id))[0]
         

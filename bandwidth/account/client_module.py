@@ -64,6 +64,8 @@ class Client:
         self.auth = (api_token, api_secret)
         self.account_id = other_options.get('account_id', None)
 
+        self.DEBUG = other_options.get('DEBUG', False)
+
     def _check_api_version_match(self, version):
         """
            Internal function
@@ -124,6 +126,9 @@ class Client:
             else:
                 url = '{}{}'.format(self.api_endpoint, url)
 
+        if self.DEBUG:
+            logging.info('{} to {} using {}, headers: {}, args: {}, kwargs: {}'.
+                         format(method, url, self.auth, headers, args, kwargs))
         return requests.request(method, url, auth=self.auth,
                                 headers=headers, *args, **kwargs)
 
@@ -131,6 +136,9 @@ class Client:
         if response.status_code >= 400:
             content_type = response.headers.get('content-type')
             error_msg = bw_error_codes.get(response.status_code, '')
+            if self.DEBUG:
+                logging.info('Error with request, error code: {}'.
+                    format(response.status_code))
             if content_type and content_type.startswith('application/json'):
                 data = response.json()
                 # if non-descriptive error message isnt available
@@ -139,17 +147,26 @@ class Client:
                 if not msg:
                     msg = error_msg
 
+                if self.DEBUG:
+                    logging.info('JSON type - Error: {}'.format(msg))
                 raise BandwidthAccountAPIException(
                        response.status_code, msg,
                        code=data.get('code',
                                      response.status_code))
             elif content_type and content_type.startswith('application/xml'):
+                # note that response is different for different error
+                # cases, so exception is raised in respective function
                 try:
                     data = xmltodict.parse(response.content)
+                    if self.DEBUG:
+                        logging.info('XML type - Error: {}'.format(data))
                     error_code, error_desc = self.get_error_details(data.get('OrderResponse', {}))
                 except xml.parsers.expat.ExpatError as e:
                     error_code = 0
                     error_desc = response.content.decode('utf-8') 
+                    if self.DEBUG:
+                        logging.info('Error parsing XML response, Error Desc {}'.
+                                      format(error_desc))
                     raise BandwidthAccountAPIException(
                                response.status_code, error_desc, code=error_code)
             else:
@@ -158,6 +175,8 @@ class Client:
                 msg = response.content.decode('utf-8')  #[:79]
                 if not msg:
                     msg = error_msg
+                if self.DEBUG:
+                    logging.info('Unknown type - Error: {}'.format(msg))
                 raise BandwidthAccountAPIException(
                                response.status_code, msg)
 
@@ -178,6 +197,8 @@ class Client:
         elif data and isinstance(data, dict):
             myid = data.get('id', None)
 
+        if self.DEBUG:
+            logging.info('Done with request, response Data: {}, Response: {}'.format(data, response))
         return (data, response, myid)
 
     """
@@ -501,16 +522,18 @@ class Client:
         """
         data = data.get('SearchResult', {})
         if self.api_v2_version:
-            result_count = data.get('ResultCount', 0)
-            if result_count:
-                tel_dict = data.get('TelephoneNumberList', {})
-                tel_list = tel_dict.get('TelephoneNumber', [])
-                # response includes string as number if result count is
-                # 1 otherwise its a list of available numbers
-                if isinstance(tel_list, list) is False:
-                    tel_list = [tel_list]
-            else:
-                tel_list = []
+            tel_list = []
+            # Bandwidth returns None as SearcResult value
+            # if numbers are not available
+            if data:
+                result_count = data.get('ResultCount', 0)
+                if result_count:
+                    tel_dict = data.get('TelephoneNumberList', {})
+                    tel_list = tel_dict.get('TelephoneNumber', [])
+                    # response includes string as number if result count is
+                    # 1 otherwise its a list of available numbers
+                    if isinstance(tel_list, list) is False:
+                        tel_list = [tel_list]
 
             return tel_list 
         else:
@@ -1385,8 +1408,90 @@ class Client:
             ##     'updated'    : '2017-02-10T09:11:50Z'}
 
         """
-        path = '/phoneNumbers/numberInfo/%s' % quote(number)
-        return self._make_request('get', path)[0]
+        if self.v1_api_version:
+            path = '/phoneNumbers/numberInfo/%s' % quote(number)
+            return self._make_request('get', path)[0]
+        else:
+            return None
+
+    def list_phone_numbers_parser(self, data):
+        """
+            parses dictionary and returns a list of phone numbers on account
+        """
+        tns = data.get('TNs', {})
+        if not tns:
+            return []
+
+        tel_obj = tns.get('TelephoneNumbers', {})
+        if not tel_obj:
+            return []
+
+        count = long(tel_obj.get('Count', 0))
+        tel_list = tel_obj.get('TelephoneNumber', [])
+
+        # if only single number is returned
+        # convert to list
+        if not isinstance(tel_list, list):
+            tel_list = [tel_list]
+
+        if count != len(tel_list):
+            logging.error('Invalid response from Bandwidth.... received '
+                          'count: {}, and list length: {}'.
+                          format(count, len(tel_list)))
+
+        if self.DEBUG:
+            logging.info("telephone list: {}-{}".format(type(tel_list), tel_list))
+        return tel_list
+
+    def list_phone_numbers_nextlink_parser(self, response):
+        """
+            parses dictionary and returns cleaned up next link URL if present
+        """
+        tns = response.get('TNs', {})
+        if not tns:
+            return ''
+
+        links = tns.get('Links', {})
+        if not links:
+            return ''
+
+        next_link = links.get('next', '')
+        if next_link and next_link.endswith(';'):
+            next_link = next_link[0:len(next_link)-1]
+
+        if next_link and next_link.startswith('Link='):
+            next_link = next_link[len('Link='):len(next_link)]
+
+        if self.DEBUG:
+            logging.info("Next link: {}".format(next_link))
+        return next_link
+
+    def get_phone_number_count(self, site_id=None):
+        """
+           fetches count of phone numbers active on a given
+           site
+        """
+        if site_id:
+            url = '/api/accounts/{}/sites/{}/totaltns'. \
+                  format(self.account_id, site_id)
+        else:
+            url = '/api/accounts/{}/inserviceNumbers'.format(self.account_id)
+
+        data, resp, order_id = self._make_request('get', url)
+        resp_tns = data.get('SiteTNsResponse', {})
+        if not resp_tns:
+            # error
+            raise BandwidthAccountAPIException(0, 'unknown error: {}'.
+                                               format(dict(data)))
+
+        site_tns = resp_tns.get('SiteTNs', {})
+        if site_tns:
+            return long(site_tns.get('TotalCount', 0))
+        else:
+            resp_status = resp_tns.get('ResponseStatus', {})
+            raise BandwidthAccountAPIException(resp_status.get('ErrorCode', 0),
+                                               '{}'.format(dict(resp_status)))
+
 
     def list_phone_numbers(
             self,
@@ -1396,6 +1501,7 @@ class Client:
             city=None,
             number_state=None,
             size=None,
+            site_id=None,
             **kwargs):
         """
         Get a list of user's phone numbers
@@ -1455,14 +1561,30 @@ class Client:
             return get_lazy_enumerator(self, lambda: self._make_request('get', path, params=kwargs))
 
         else:
+            if size: kwargs['size'] = size
             kwargs['applicationId'] = application_id
-            url = '/api/accounts/{}/inserviceNumbers'.format(self.account_id)
-            data, resp, order_id = self._make_request('get', url, params=kwargs)
-            if resp.status_code != 200:
-                return []
-            # parse numbers from dictionary
-            raise NotImplementedError("Incomplete implementation..........")
+            if site_id:
+                url = '/api/accounts/{}/sites/{}/inserviceNumbers'. \
+                      format(self.account_id, site_id)
+            else:
+                url = '/api/accounts/{}/inserviceNumbers'.format(self.account_id)
 
+            return get_lazy_enumerator(self, lambda: self._make_request('get', url, params=kwargs),
+                                       self.list_phone_numbers_parser,
+                                       self.list_phone_numbers_nextlink_parser)
+
+    def get_siteinfo_for_number(self, number):
+        """
+           determines site id and site name a given phone number
+           is attached to.
+
+           returns dictionary with {'Id':<id>, 'Name':<name>}
+        """
+        if self.api_v1_version:
+            raise NotImplementedError('This method is not supported on v1 API version')
+
+        data, response, _ = self._make_request('get', '/api/tns/{}/sites'.format(number))
+        return dict(data.get('Site', {}))
 
     def order_phone_number(self,
                            number=None,
@@ -1548,10 +1670,21 @@ class Client:
 
         """
         if self.api_v2_version:
-            url = '/api/accounts/{}/inserviceNumbers/{}'.format(self.account_id, number_id)
-            logging.info("Calling Get to URL: {}".format(url))
-            data, resp, order_id = self._make_request('get', url)
-            logging.info("data: {}, response: {}".format(data, resp))
+            data, resp, order_id = self._make_request(
+                'get',
+                '/api/tns/{}/tndetails'.format(number_id))
+
+            tns_resp = data.get('TelephoneNumberResponse', {})
+            if not tns_resp:
+                raise BandwidthAccountAPIException(-1, 'unknown error occured, resp: {}'.format(dict(data)))
+
+            details = tns_resp.get('TelephoneNumberDetails', {})
+            if details:
+                return dict(details)
+            else:  # an error
+                error = tns_resp.get('ResponseStatus', {})
+                raise BandwidthAccountAPIException(error.get('ErrorCode', -1),
+                                                   error.get('Description', 'Unknown Error'))
         else:
             return self._make_request('get', '/users/%s/phoneNumbers/%s' % (self.user_id, number_id))[0]
 

@@ -1,5 +1,4 @@
-
-def get_lazy_enumerator(client, get_first_page):
+def get_lazy_enumerator(client, get_first_page, item_parser=None, next_link_parser=None):
     """
     Returns api results as "lazy" collection.
     Makes api requests for new parts of data on demand only.
@@ -13,16 +12,26 @@ def get_lazy_enumerator(client, get_first_page):
     """
     get_data = get_first_page
     while True:
-        items, response, _ = get_data()
+        _items, response, _ = get_data()
         next_page_url = ''
+
+        if item_parser: items = item_parser(_items)
+        else: items = _items
+
         for item in items:
             yield item
-        links = response.headers.get('link', '').split(',')
+
+        if next_link_parser:
+            links = [next_link_parser(_items)]
+        else:
+            links = response.headers.get('link', '').split(',')
+
         for link in links:
             values = link.split(';')
             if len(values) == 2 and values[1].strip() == 'rel="next"':
                 next_page_url = values[0].replace('<', ' ').replace('>', ' ').strip()
                 break
+
         if len(next_page_url) == 0:
             break
 
