@@ -19,6 +19,7 @@ from .api_exception_module import BandwidthOrderPendingException
 
 quote = urllib.parse.quote if six.PY3 else urllib.quote
 lazy_map = map if six.PY3 else itertools.imap
+MAX_POLL_TRIES = 8  # number of times to check for an order
 
 
 class Client:
@@ -756,10 +757,13 @@ class Client:
         num_tries = 0
         number_list = []
         order_status = '' 
-        while num_tries < 5 and order_status not in ('COMPLETE', 'FAILED', 'PARTIAL'):
+        while num_tries < MAX_POLL_TRIES and order_status not in ('COMPLETE', 'FAILED', 'PARTIAL'):
             # order did not go through yet - wait and try again
             order_status, number_list, error_desc = self.get_phoneorder_info(order_id)
             num_tries += 1
+            if self.DEBUG:
+                logging.info('Buy phone number, order id: {}, try: {}, order status: {}'.
+                             format(order_id, num_tries, order_status))
 
         if order_status == 'RECEIVED':
             raise BandwidthOrderPendingException(order_id)
@@ -1771,10 +1775,13 @@ class Client:
             num_tries = 0
             number_list = []
             order_status = '' 
-            while num_tries < 5 and order_status not in ('COMPLETE', 'FAILED', 'PARTIAL'):
+            while num_tries < MAX_POLL_TRIES and order_status not in ('COMPLETE', 'FAILED', 'PARTIAL'):
                 # order did not go through yet - wait and try again
                 order_status, numbers_deleted, error_desc = self.get_phonedelete_info(order_id)
                 num_tries += 1
+                if self.DEBUG:
+                    logging.info('Buy phone number, order id: {}, try: {}, order status: {}'.
+                                 format(order_id, num_tries, order_status))
 
             if order_status != 'COMPLETE':
                 raise BandwidthAccountAPIException(order_status, 'Unable to delete number {}, Attempts: {}, Error: {}'.format(number_id, num_tries, error_desc))
