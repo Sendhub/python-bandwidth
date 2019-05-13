@@ -658,7 +658,7 @@ class Client:
             return self._make_request('get', '/availableNumbers/tollFree', params=kwargs)[0]
         else:
             # wild card pattern is for 8xx or 80x or 87x etc.
-            kwargs["tollFreeWildCardPattern"] = pattern
+            kwargs["tollFreeWildCardPattern"] = pattern if pattern else '8**'
             url = '/api/accounts/{}/availableNumbers'.format(self.account_id)
             data, response, order_id = self._make_request('get', url, params=kwargs)
             return self._parse_available_numbers_list(data)
